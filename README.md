@@ -22,17 +22,20 @@ This is a PyTorch implementation of the [**Merge DNA**](https://arxiv.org/pdf/25
 ## Usage
 
 ### Setup
+
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ### Training
-To run a test training session on synthetic DNA with a small number of steps:
+
+To run a test training session on synthetic DNA (20 steps):
+
 ```bash
-python scripts/train.py --steps 20 --seq-len 256 --batch-size 4 --device cpu
+uv run scripts/train.py --steps 20 --seq-len 256 --batch-size 4
 ```
 
-On CUDA:
+**On CUDA:**
 ```bash
-python scripts/train.py --steps 100 --seq-len 512 --batch-size 8 --device cuda
+uv run scripts/train.py --steps 100 --seq-len 512 --batch-size 8 --device cuda
 ```
