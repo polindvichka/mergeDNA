@@ -58,7 +58,9 @@ class MultiHeadSelfAttention(nn.Module):
         attn_weights = self.dropout(F.softmax(scores, dim=-1))
         out = torch.matmul(attn_weights, v).transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
         
-        metric = out.clone()
+        # Metric for token merging: Paper uses Keys specifically
+        # We average across heads as per standard practices in reference repos
+        metric = k.mean(dim=1) # [B, N, head_dim]
         return self.o_proj(out), metric
 
 class TransformerBlock(nn.Module):

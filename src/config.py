@@ -16,7 +16,9 @@ class MergeDNAConfig:
     local_window_size: int = 16
     local_target_ratio: float = 0.5  # Local encoder targets L ~= N/2
     latent_target_ratio: float = 0.5 # Latent encoder targets K ~= L/2
-    
+    local_ratio_min: float = 0.4
+    local_ratio_max: float = 0.6
+
     # Layer Counts
     local_encoder_layers: int = 4
     latent_encoder_layers: int = 20

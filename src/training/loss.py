@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from src.layers.token_merging import global_merge, unmerge
 from src.models.mergedna import MergeDNA
 
 class MergeDNALoss(nn.Module):
@@ -12,26 +13,26 @@ class MergeDNALoss(nn.Module):
         self.model = model
         self.mask_token_id = model.config.mask_token_id
 
-    def sample_amtm_masks(self, s_latent: torch.Tensor, s_local: torch.Tensor):
+    def sample_amtm_masks(self, sizes_L: torch.Tensor, s_local: torch.Tensor, K: int):
         """
-        Samples the informative tokens using the S_latent grouping probability
+        Samples the informative tokens using the local token sizes probability
         and projects the mask back to the N base nucleotides using S_local.
         """
-        B, L, K = s_latent.shape
+        B, L = sizes_L.shape
         _, N, _ = s_local.shape
         
         # 1. Weight groups heavily penalizing uniform blocks: P ~ 1 / g^2
-        g = s_latent.sum(dim=1).clamp(min=1.0) # (B, K)
+        # where g is the number of base nucleotides in the local token.
+        g = sizes_L.clamp(min=1.0) # (B, L)
         group_weights = 1.0 / (g * g)
         
-        # 2. Project K weights back to L tokens
-        token_weights = torch.bmm(s_latent, group_weights.unsqueeze(-1)).squeeze(-1) # (B, L)
-        probs = token_weights / token_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        # 2. Normalize probabilities across the L local tokens
+        probs = group_weights / group_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
         
         # 3. Sample exactly K informative local tokens without replacement
         k_sample = min(K, L)
         
-        mask_L = torch.zeros(B, L, dtype=torch.bool, device=s_latent.device)
+        mask_L = torch.zeros(B, L, dtype=torch.bool, device=sizes_L.device)
         for b in range(B):
             idx = torch.multinomial(probs[b], num_samples=k_sample, replacement=False)
             mask_L[b, idx] = True
@@ -55,7 +56,7 @@ class MergeDNALoss(nn.Module):
         
         # We need a dedicated pass for the latent decoder to compute its own MTR loss
         target_k = max(1, int(z_L_detached.size(1) * self.model.config.latent_target_ratio))
-        s_latent_init = torch.eye(z_L_detached.size(1), device=input_ids.device).unsqueeze(0).expand(B, -1, -1)
+        s_latent_acc = torch.eye(z_L_detached.size(1), device=input_ids.device).unsqueeze(0).repeat(B, 1, 1)
         
         # Manually reconstruct the latent-only branch to get logits for Latent MTR
         x_latent = z_L_detached
@@ -66,12 +67,13 @@ class MergeDNALoss(nn.Module):
             x_latent, metric = layer_block(x_latent, token_weights=tok_weights, return_metric=True)
             layers_left = len(self.model.latent_encoder) - i
             target_step = max(target_k, int(x_latent.size(1) * (1.0 - (1.0 - (target_k / x_latent.size(1)) ** (1.0 / layers_left)))))
-            x_latent, s_latent_init, tok_weights, _, _ = global_merge(x_latent, tok_weights, metric, target_step)
+            x_latent, step_s, tok_weights, _, _ = global_merge(x_latent, tok_weights, metric, target_step)
+            s_latent_acc = torch.bmm(s_latent_acc, step_s)
             
         z_K_latent = x_latent
         
         # Latent decode
-        x_latent = unmerge(z_K_latent, s_latent_init)
+        x_latent = unmerge(z_K_latent, s_latent_acc)
         for layer_block in self.model.latent_decoder:
             x_latent = layer_block(x_latent)
         
@@ -86,8 +88,10 @@ class MergeDNALoss(nn.Module):
         # 3. Adaptive Masked Token Modeling (AMTM) Loss
         s_latent = out_mtr["s_latent"].detach()
         s_local = out_mtr["s_local"].detach()
+        sizes_L = out_mtr["sizes_L"].detach()
         
-        mask_L, mask_N = self.sample_amtm_masks(s_latent, s_local)
+        B, L, K = s_latent.shape
+        mask_L, mask_N = self.sample_amtm_masks(sizes_L, s_local, K)
         
         masked_inputs = input_ids.clone()
         masked_inputs[mask_N] = self.mask_token_id

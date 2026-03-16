@@ -215,24 +215,37 @@ def global_merge(hidden_states: torch.Tensor, token_weights: torch.Tensor, metri
             original_idx = old_a_idx * 2  # A tokens are at even indices
             step_tracking[original_idx, new_idx] = 1.0
             
-        # Phase 2: Add merged A tokens into their destination B tokens
+        # Phase 2: Aggregate A tokens into their destination B tokens
+        # We use index_add to avoid in-place version conflicts
+        dest_indices = b_dests.to(device)
+        
+        # Prepare hidden states and weights from A to be added to B
+        a_to_add_hidden = a_tokens[b, a_merge] * a_weights[b, a_merge].unsqueeze(-1)
+        a_to_add_weights = a_weights[b, a_merge]
+        
+        out_b_hidden_sum = b_tokens[b] * b_weights[b].unsqueeze(-1)
+        out_b_weights_sum = b_weights[b].clone()
+        
+        out_b_hidden_sum.index_add_(0, dest_indices, a_to_add_hidden)
+        out_b_weights_sum.index_add_(0, dest_indices, a_to_add_weights)
+        
+        out_b_hidden = out_b_hidden_sum / out_b_weights_sum.unsqueeze(-1).clamp(min=1e-5)
+        out_b_weights = out_b_weights_sum
+        
+        if pad_mask is not None:
+            # For padding, if any constituent is not padded, the result is not padded?
+            # Or if ALL are padded, result is padded.
+            # Let's say: result is padded only if all merged tokens were padded.
+            # Using logical_and iteratively:
+            out_b_pad = b_pad[b].clone()
+            for i, a_idx in enumerate(a_merge.tolist()):
+                dest_idx = dest_indices[i].item()
+                out_b_pad[dest_idx] = out_b_pad[dest_idx] & a_pad[b, a_idx]
+        
+        # Map tracking
         for i, a_idx in enumerate(a_merge.tolist()):
-            dest_b_idx = b_dests[i].item()
-            
-            # Weighted average
-            wa = a_weights[b, a_idx]
-            wb = out_b_weights[dest_b_idx]
-            new_w = wa + wb
-            
-            out_b_hidden[dest_b_idx] = (a_tokens[b, a_idx] * wa + out_b_hidden[dest_b_idx] * wb) / new_w.clamp(min=1e-5)
-            out_b_weights[dest_b_idx] = new_w
-            if pad_mask is not None: out_b_pad[dest_b_idx] = out_b_pad[dest_b_idx] and a_pad[b, a_idx]
-            
-            # Map tracking
             original_a_idx = a_idx * 2
-            original_b_idx = (dest_b_idx * 2) + 1
-            new_composite_idx = len(a_unmerge) + dest_b_idx
-            
+            new_composite_idx = len(a_unmerge) + dest_indices[i].item()
             step_tracking[original_a_idx, new_composite_idx] = 1.0
             
         # Phase 3: Map all B tokens (modified and unmodified)

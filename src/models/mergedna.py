@@ -47,10 +47,10 @@ class MergeDNA(nn.Module):
         x = self.token_emb(input_ids)
         
         # Initial states
-        pos_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        pos_ids = torch.arange(seq_len, device=device).unsqueeze(0).repeat(batch_size, 1)
         pad_mask = (input_ids == self.config.pad_token_id)
         token_weights = torch.ones(batch_size, seq_len, device=device)
-        s_local = torch.eye(seq_len, device=device).unsqueeze(0).expand(batch_size, -1, -1)
+        s_local = torch.eye(seq_len, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
         
         # 1. Local Encoder (N -> L)
         target_l = max(1, int(seq_len * local_ratio))
@@ -72,7 +72,7 @@ class MergeDNA(nn.Module):
         # 2. Latent Encoder (L -> K)
         len_l = x.size(1)
         target_k = max(1, int(len_l * latent_ratio))
-        s_latent = torch.eye(len_l, device=device).unsqueeze(0).expand(batch_size, -1, -1)
+        s_latent = torch.eye(len_l, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
         
         for i, layer_block in enumerate(self.latent_encoder):
             x, metric = layer_block(x, token_weights=token_weights, pos_ids=pos_ids, pad_mask=pad_mask, return_metric=True)
@@ -81,9 +81,10 @@ class MergeDNA(nn.Module):
                 layers_left = len(self.latent_encoder) - i
                 target_len_step = max(target_k, int(x.size(1) * (1.0 - _merges_per_layer(x.size(1), target_k, layers_left))))
                 
-                x, s_latent, token_weights, pos_ids, pad_mask = global_merge(
+                x, step_s, token_weights, pos_ids, pad_mask = global_merge(
                     x, token_weights, metric, target_len_step, pos_ids=pos_ids, pad_mask=pad_mask
                 )
+                s_latent = torch.bmm(s_latent, step_s)
                 
         z_K = x
         
